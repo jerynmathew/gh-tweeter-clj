@@ -1,11 +1,43 @@
 (ns gh-tweeter-clj.core
     (:gen-class)
     (:require [clj-http.lite.client :as client])
-    (:require [cemerick.url :refer (url url-encode)])
     (:require [clojure.data.json :as json])
     (:require [clojure.string :as str])
+    (:require [clojure.java [io :as io]])
     (:require [oauth.client :as oauth])
-    (:use [slingshot.slingshot :only [throw+ try+]]))
+    (:require [clojure.tools.cli :refer [parse-opts]]))
+
+
+(defn usage 
+    "Return a Usage string to be printed later"
+    [options-summary]
+    (->> ["The application fetches latest open PRs from given github-repo and tweets it to given twitter account"
+          ""
+          "Usage: program-name [options] github-repo-name"
+          ""
+          "Options:"
+          options-summary
+          ""]
+          (str/join \newline)))
+
+
+(defn error-msg 
+    "Print 'errors' message"
+    [errors]
+    (str "The following errors occurred while parsing your command:\n\n"
+        (str/join \newline errors)))
+
+
+(defn exit 
+    "Exit application with 'status' code AFTER printing 'msg' on screen"
+    [status msg]
+    (println msg)
+    (System/exit status))
+
+
+(def cli-options [["-c" "--config-file" :required "JSON Config file containing credentials, twitter handle, github repo" 
+                                        :parse-fn #(str %)]
+                  ["-h" "--help" ]])
 
 
 (defn select-keys* [m paths]
@@ -15,35 +47,41 @@
 
 
 (defn get-pr-details [dict]
-    (select-keys* dict [["number"] ["title"] ["user" "login"]]))
+    (select-keys* dict [["number"] ["title"]]))
 
 
 (defn get-github-pr-url [repo-str]
     (format "https://api.github.com/repos/%s/pulls?state=open" repo-str))
 
 
-(defn get-open-prs [github-url]
-    (map get-pr-details 
-        (json/read-str
-            ((client/get github-url {:basic-auth "jerynmathew:74dfc83ddfa7f57796c5781eedc31ee7797b9389"}) :body))))
+(defn check-gh-url [github-url auth-token]
+    (< ((client/head github-url {:basic-auth auth-token :throw-exceptions false}) :status ) 299))
 
 
-(defn get-next-url [github-url]
+(defn get-open-prs [github-url auth-token]
+    (if (check-gh-url github-url auth-token)
+        (map get-pr-details 
+            (json/read-str
+                ((client/get github-url {:basic-auth auth-token}) :body)))
+        (exit 1 "This Github Repo cannot be found!")))
+
+
+(defn get-next-url [github-url auth-token]
     (second 
         (re-find 
             #"<(.*)>;\s+rel=\"next\"" 
-            (((client/head github-url {:basic-auth "jerynmathew:74dfc83ddfa7f57796c5781eedc31ee7797b9389"}) :headers) "link")))
+            (((client/head github-url {:basic-auth auth-token}) :headers) "link")))
     )
 
 
 ;recursive loop to create list of new open prs
-(defn get-new-prs [repo-str last-pr-id]
+(defn get-new-prs [repo-str last-pr-id auth-token]
     (loop [url (get-github-pr-url repo-str)
            prs []]
 
-        (let [all-prs (get-open-prs url)
+        (let [all-prs (get-open-prs url auth-token)
               new-prs (filter #(> (% "number") last-pr-id) all-prs)
-              next-url (get-next-url url)]
+              next-url (get-next-url url auth-token)]
 
             (if-not (and next-url 
                         (= (count all-prs) 
@@ -88,15 +126,13 @@
                                         :POST
                                         twurl
                                         user-params)]
-        (json/read-str 
-            ((client/post twurl {:query-params (merge credentials user-params)}) :body))))
+        (client/post twurl {:query-params (merge credentials user-params)}) :body))
 
 
 (defn search-tweet [twitter-handle
                     oauth-consumer
                     access-token
                     access-token-secret]
-
     (let [user-params {:screen_name twitter-handle}
           twurl "https://api.twitter.com/1.1/statuses/user_timeline.json"
           credentials (oauth/credentials oauth-consumer
@@ -105,5 +141,72 @@
                                         :GET
                                         twurl
                                         user-params)]
-        (json/read-str 
-            ((client/get twurl {:query-params (merge credentials user-params)}) :body))))
+        (client/get twurl {:query-params (merge credentials user-params)}) :body))
+
+
+(defn update-last-used-pr [repo-name pr-id]
+    (or 
+        (spit "./last-pr-id.json" 
+            (merge (json/read-str (slurp "./last-pr-id.json")) {repo-name pr-id}))) pr-id)
+
+
+(defn get-last-known-pr [repo-name]
+    (if (.exists (io/as-file "./last-pr-id.json"))
+        (let [latest-pr-id ((json/read-str (slurp "./last-pr-id.json")) repo-name)]
+          (if (nil? latest-pr-id)
+            (update-last-used-pr repo-name 0)
+            latest-pr-id))
+        (or (spit "./last-pr-id.json" (json/write-str {repo-name 0})) 0)))
+
+
+(defn gen-tweets-from-prs [repo-name pr-map]
+    (let [{number "number"
+           title "title"} pr-map]
+        (def tweet (format "%s [%s] %s" repo-name number title))
+        (subs tweet 0 (min (count tweet) 280) )))
+
+
+(defn -main 
+    [& args]
+
+    ;; Setup args
+    (let [{:keys [options arguments errors summary]} (parse-opts args cli-options)]
+        ;; Handle help and error conditions
+        (cond
+            ;; Handle '-h'
+            (:help options) (exit 0 (usage summary))
+            ;; Handle '-c'
+            (empty? (:config-file options)) (exit 1 (error-msg ["-c/--config-file option is required"]))
+            ;; Handle errors
+            errors (exit 1 (error-msg errors))
+            ;; Handle args 
+            (< (count arguments) 1) ((exit 1 (usage summary))))
+        
+        (def repo-name (first arguments))
+        (def config (json/read-str (slurp (:config-file options))))
+        (println "Last known PR: " (get-last-known-pr repo-name))
+
+        ;; Fetch details of PRs 
+        (def results (get-new-prs repo-name (get-last-known-pr repo-name) (config "github_basic_auth_token")))
+
+        ;; Update latest PR into local state
+        (if-not (empty? results)
+            (update-last-used-pr repo-name ((first results) "number"))))
+
+        ;; generate tweets
+        (def tweets (map #(gen-tweets-from-prs repo-name %) results))
+
+        (if (= (count tweets) 0)
+            (exit 0 (format "No new tweets to post for %s repo!" repo-name)))
+
+        (def credentials
+            (let [{c-key "twitter-consumer-key"
+                   c-secret "twitter-consumer-secret"} config]
+                (create-post-credentials c-key c-secret)))
+
+        (let [{:keys [consumer access-token]} credentials]
+            (doseq [tweet tweets] 
+                (post-tweet tweet consumer access-token)))
+
+    ;; Print Results and exit 0
+    (exit 0 (format "Posted %s Tweets" (count tweets))))
