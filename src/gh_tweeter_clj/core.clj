@@ -3,7 +3,9 @@
     (:require [clj-http.lite.client :as client])
     (:require [cemerick.url :refer (url url-encode)])
     (:require [clojure.data.json :as json])
-    (:require [clojure.string :as str]))
+    (:require [clojure.string :as str])
+    (:require [oauth.client :as oauth])
+    (:use [slingshot.slingshot :only [throw+ try+]]))
 
 
 (defn select-keys* [m paths]
@@ -50,6 +52,40 @@
                 (recur next-url
                        (concat prs new-prs))))))
 
+
+(defn test-oauth []
+    (def consumer 
+        (oauth/make-consumer "JqksaXQ93obirTYhf63GMUHyD"
+                             "vhDReUCjo8QX5p80MI5noh5b5cxGY7cbEBF1GXM0C1zAcMNbau"
+                             "https://api.twitter.com/oauth/request_token"
+                             "https://api.twitter.com/oauth/access_token"
+                             "https://api.twitter.com/oauth/authorize"
+                             :hmac-sha1))
+    (def request-token (oauth/request-token consumer))
+
+    (def approval-resp (oauth/user-approval-uri consumer 
+                            (:oauth_token request-token)))
+    (println "Approval Resp: " approval-resp)
+
+    ;; without verifier
+    ;(def access-token-response (oauth/access-token consumer request-token))
+    ;(println "AccessTokenResp: " access-token-response)
+
+    ; (def user-params {:screen_name "jer_matt"})
+    (def user-params {:status "Greeting Twitter! Posting from #clojure with #oauth."})
+
+    ; (def twurl "https://api.twitter.com/1.1/statuses/user_timeline.json")
+    (def twurl "https://api.twitter.com/1.1/statuses/update.json")
+
+    (def credentials (oauth/credentials consumer
+                                        (:oauth_token "942359695594987520-hAQ061y3BJL0eYmyt9QMvftuMLmQqnF")
+                                        (:oauth_token_secret "c2rjFSRQJJ6TbsLTPjbV22O9LrozAddgaxakf8qGHLnVj")
+                                        :POST
+                                        twurl
+                                        user-params))
+
+    (client/post twurl {:query-params (merge credentials user-params)})
+)
 
 
 (defn post-tweet [twitter-handle message]
