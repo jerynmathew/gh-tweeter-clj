@@ -53,43 +53,57 @@
                        (concat prs new-prs))))))
 
 
-(defn test-oauth []
-    (def consumer 
-        (oauth/make-consumer "JqksaXQ93obirTYhf63GMUHyD"
-                             "vhDReUCjo8QX5p80MI5noh5b5cxGY7cbEBF1GXM0C1zAcMNbau"
-                             "https://api.twitter.com/oauth/request_token"
-                             "https://api.twitter.com/oauth/access_token"
-                             "https://api.twitter.com/oauth/authorize"
-                             :hmac-sha1))
-    (def request-token (oauth/request-token consumer))
+(defn create-search-credentials [consumer-key
+                                 consumer-secret]
+    (oauth/make-consumer consumer-key
+                         consumer-secret
+                         "https://api.twitter.com/oauth/request_token"
+                         "https://api.twitter.com/oauth/access_token"
+                         "https://api.twitter.com/oauth/authorize"
+                         :hmac-sha1))
 
-    (def approval-resp (oauth/user-approval-uri consumer 
-                            (:oauth_token request-token)))
-    (println "Approval Resp: " approval-resp)
 
-    ;; without verifier
-    ;(def access-token-response (oauth/access-token consumer request-token))
-    ;(println "AccessTokenResp: " access-token-response)
+(defn create-post-credentials [consumer-key
+                               consumer-secret]
+    (let [consumer (create-search-credentials consumer-key consumer-secret)
+          request-token (oauth/request-token consumer)
+          approval-resp (oauth/user-approval-uri consumer (:oauth_token request-token))]
 
-    ; (def user-params {:screen_name "jer_matt"})
-    (def user-params {:status "Greeting Twitter! Posting from #clojure with #oauth."})
+        (println "Click on this link and copy the PIN: " approval-resp)
+        (print "Enter the PIN: ") (flush)
+        (def verifier-pin (read-line))
 
-    ; (def twurl "https://api.twitter.com/1.1/statuses/user_timeline.json")
-    (def twurl "https://api.twitter.com/1.1/statuses/update.json")
+        {:consumer consumer
+         :access-token (oauth/access-token consumer request-token verifier-pin)}))
 
-    (def credentials (oauth/credentials consumer
-                                        (:oauth_token "942359695594987520-hAQ061y3BJL0eYmyt9QMvftuMLmQqnF")
-                                        (:oauth_token_secret "c2rjFSRQJJ6TbsLTPjbV22O9LrozAddgaxakf8qGHLnVj")
+
+(defn post-tweet [message 
+                  oauth-consumer 
+                  bearer-token]
+    (let [user-params {:status message}
+          twurl "https://api.twitter.com/1.1/statuses/update.json"
+          credentials (oauth/credentials oauth-consumer
+                                        (:oauth_token bearer-token)
+                                        (:oauth_token_secret bearer-token)
                                         :POST
                                         twurl
-                                        user-params))
+                                        user-params)]
+        (json/read-str 
+            ((client/post twurl {:query-params (merge credentials user-params)}) :body))))
 
-    (client/post twurl {:query-params (merge credentials user-params)})
-)
 
+(defn search-tweet [twitter-handle
+                    oauth-consumer
+                    access-token
+                    access-token-secret]
 
-(defn post-tweet [twitter-handle message]
-    )
-
-(defn search-tweet [twitter-handle]
-    )
+    (let [user-params {:screen_name twitter-handle}
+          twurl "https://api.twitter.com/1.1/statuses/user_timeline.json"
+          credentials (oauth/credentials oauth-consumer
+                                        (:oauth_token access-token)
+                                        (:oauth_token_secret access-token-secret)
+                                        :GET
+                                        twurl
+                                        user-params)]
+        (json/read-str 
+            ((client/get twurl {:query-params (merge credentials user-params)}) :body))))
